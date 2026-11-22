@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "yandex-call-guard"
+rootProject.name = "callguard"
 include(":app")

@@ -1,6 +1,5 @@
-package ru.guardcall.yandex
+package ru.callguard
 
-import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -10,14 +9,14 @@ import java.net.URL
 import java.net.URLEncoder
 
 /**
- * Прямой запрос к тому же сервису, который использует АОН Яндекс.Браузера:
+ * Прямой запрос к сервису определителя номера Яндекса:
  * https://cid.yandex.net/v7/info?phonenums=...&verticals=ugc&lang=ru&lr=213
  *
- * Сервис отдаёт ugc.verdict ("bank.telemarketing", "notification", "polarity.positive"),
- * ugc.polarity ("positive" / "negative") и ugc.description ("Предложение услуг банка.").
+ * ugc.verdict: bank.telemarketing, notification, polarity.positive и т.д.
+ * ugc.polarity: positive / negative.
+ * ugc.description: «Предложение услуг банка.»
  *
- * Запрос обязан содержать заголовок Authorization. Сейчас значение не проверяется,
- * но Яндекс может включить проверку в любой момент.
+ * Заголовок Authorization обязателен: без него 400. Значение сейчас не проверяется.
  */
 object YandexChecker {
 
@@ -36,11 +35,9 @@ object YandexChecker {
         "marketing"
     )
 
-    fun check(ctx: Context, rawNumber: String, timeoutMs: Int = 2500): CheckResult {
+    fun check(rawNumber: String, timeoutMs: Int = 2500): CheckResult {
         val number = PhoneNumbers.normalize(rawNumber)
-        if (number.length < 10) {
-            return CheckResult(Verdict.UNKNOWN, "короткий номер, не проверяю")
-        }
+        if (number.length < 10) return CheckResult(Verdict.UNKNOWN, "короткий номер")
 
         val url = buildString {
             append(ENDPOINT)
@@ -94,24 +91,25 @@ object YandexChecker {
         val description = str(ugc, "description")
         val polarity = str(ugc, "polarity")
         val verdict = str(ugc, "verdict")
+        val verdictText = verdict.orEmpty()
+
         val org = result.optJSONObject("geo")
             ?.optJSONArray("results")
             ?.optJSONObject(0)
             ?.let { str(it, "name") }
 
         val label = description ?: org
-        val verdictText = verdict.orEmpty()
 
         if (polarity == "negative" || spamVerdictParts.any { verdictText.contains(it) }) {
-            return CheckResult(Verdict.SPAM, label?.let { "«$it»" } ?: "негативная метка: $verdictText")
+            return CheckResult(Verdict.SPAM, label ?: "метка: $verdictText")
         }
 
         if (polarity == "positive") {
-            return CheckResult(Verdict.CLEAN, label?.let { "«$it»" } ?: "положительные отзывы")
+            return CheckResult(Verdict.CLEAN, label ?: "положительные отзывы")
         }
 
-        if (!verdict.isNullOrBlank() && verdict != "null") {
-            return CheckResult(Verdict.CLEAN, label?.let { "«$it»" } ?: "метка: $verdict")
+        if (verdictText.isNotBlank()) {
+            return CheckResult(Verdict.CLEAN, label ?: "метка: $verdictText")
         }
 
         return CheckResult(Verdict.UNKNOWN, "данных о номере нет")

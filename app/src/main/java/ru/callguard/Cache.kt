@@ -1,8 +1,8 @@
-package ru.guardcall.yandex
+package ru.callguard
 
 import java.util.concurrent.ConcurrentHashMap
 
-/** Кэш вердиктов только в памяти процесса. На диск ничего не пишется. */
+/** Кэш вердиктов только в памяти процесса. */
 object Cache {
 
     private const val MAX = 300

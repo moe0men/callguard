@@ -1,5 +1,6 @@
-package ru.guardcall.yandex
+package ru.callguard
 
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.telecom.Call
@@ -9,7 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Перехват входящего звонка до гудка.
- * Правила: контакт -> обычный звонок; метка спама -> беззвучно; всё остальное -> обычный звонок.
+ * Контакт -> обычный звонок. Метка спама -> беззвучно. Всё остальное -> обычный звонок.
  */
 class CallGuardService : CallScreeningService() {
 
@@ -22,69 +23,62 @@ class CallGuardService : CallScreeningService() {
         val number = callDetails.handle?.schemeSpecificPart?.takeIf { it.isNotBlank() }
         val incoming = callDetails.callDirection == Call.Details.DIRECTION_INCOMING
 
-        if (!incoming || number == null) {
-            allow(callDetails)
-            return
-        }
-
-        if (!Prefs.isEnabled(this) || !Prefs.useYandex(this)) {
+        if (!incoming || number == null || !Prefs.isEnabled(this)) {
             allow(callDetails)
             return
         }
 
         if (ContactsChecker.isKnown(this, number)) {
-            AppLog.add("${PhoneNumbers.pretty(number)}: в контактах")
+            AppLog.add(number, Verdict.CLEAN, "номер в контактах")
             allow(callDetails)
             return
         }
 
         val key = PhoneNumbers.normalize(number)
-        val cached = Cache.get(key)
-        if (cached != null) {
-            AppLog.add("${PhoneNumbers.pretty(number)}: ${cached.verdict} (кэш), ${cached.reason}")
+        Cache.get(key)?.let { cached ->
+            AppLog.add(number, cached.verdict, cached.reason + " · кэш")
             respond(callDetails, cached.verdict)
             return
         }
 
-        // Система ждёт ответ 5 секунд. Через 4.3 с отвечаем "обычный звонок".
+        // Android ждёт respondToCall не больше 5 секунд.
         main.postDelayed({ timeout(callDetails, number) }, 4300)
 
         Thread({
             val started = System.currentTimeMillis()
             val result = try {
-                YandexChecker.check(this, number, 2500)
+                YandexChecker.check(number, 2500)
             } catch (t: Throwable) {
                 CheckResult(Verdict.UNKNOWN, "ошибка: ${t.javaClass.simpleName}")
             }
             Cache.put(key, result)
             val spent = System.currentTimeMillis() - started
-            AppLog.add("${PhoneNumbers.pretty(number)}: ${result.verdict} за $spent мс, ${result.reason}")
+            AppLog.add(number, result.verdict, "${result.reason} · $spent мс")
             respond(callDetails, result.verdict)
         }, "yandex-check").apply { isDaemon = true }.start()
     }
 
     private fun timeout(details: Call.Details, number: String) {
         if (responded.get()) return
-        AppLog.add("${PhoneNumbers.pretty(number)}: таймаут, обычный звонок")
+        AppLog.add(number, Verdict.UNKNOWN, "таймаут проверки")
         respond(details, Verdict.UNKNOWN)
     }
 
-    private fun allow(details: Call.Details) {
-        respond(details, Verdict.CLEAN)
-    }
+    private fun allow(details: Call.Details) = respond(details, Verdict.CLEAN)
 
     private fun respond(details: Call.Details, verdict: Verdict) {
         if (!responded.compareAndSet(false, true)) return
         val silence = verdict == Verdict.SPAM && Prefs.isSilence(this)
-        val response = CallResponse.Builder()
+        val builder = CallResponse.Builder()
             .setDisallowCall(false)
             .setRejectCall(false)
-            .setSilenceCall(silence)
             .setSkipCallLog(false)
             .setSkipNotification(false)
-            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setSilenceCall(silence)
+        }
         try {
-            respondToCall(details, response)
+            respondToCall(details, builder.build())
         } catch (t: Throwable) {
             Log.w("CallGuard", "respondToCall failed", t)
         }

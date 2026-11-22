@@ -1,20 +1,13 @@
-package ru.guardcall.yandex
+package ru.callguard
 
-/** Вердикт по номеру. */
 enum class Verdict {
-    /** Найдены метки спама, мошенничества или жалоб. */
     SPAM,
-
-    /** Найдено прямое указание, что звонок полезный или данных о спаме нет. */
     CLEAN,
-
-    /** Ответа нет, капча, ошибка сети или непонятная выдача. */
     UNKNOWN
 }
 
 data class CheckResult(val verdict: Verdict, val reason: String)
 
-/** Приведение номера к виду 7XXXXXXXXXX. */
 object PhoneNumbers {
 
     fun normalize(raw: String): String {
@@ -27,7 +20,6 @@ object PhoneNumbers {
         }
     }
 
-    /** Номер в виде +7 900 123-45-67 для поиска и логов. */
     fun pretty(raw: String): String {
         val d = normalize(raw)
         if (d.length != 11) return raw

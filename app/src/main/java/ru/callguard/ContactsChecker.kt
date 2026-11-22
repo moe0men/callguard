@@ -1,4 +1,4 @@
-package ru.guardcall.yandex
+package ru.callguard
 
 import android.Manifest
 import android.content.Context
@@ -6,7 +6,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.ContactsContract
 
-/** Проверка "номер есть в контактах". Без разрешения всегда false. */
 object ContactsChecker {
 
     fun hasPermission(ctx: Context): Boolean =
