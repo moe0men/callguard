@@ -52,7 +52,7 @@ class CallGuardService : CallScreeningService() {
         Thread({
             val started = System.currentTimeMillis()
             val result = try {
-                YandexChecker.check(this, number, 3500)
+                YandexChecker.check(this, number, 2500)
             } catch (t: Throwable) {
                 CheckResult(Verdict.UNKNOWN, "ошибка: ${t.javaClass.simpleName}")
             }
