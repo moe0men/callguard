@@ -26,12 +26,14 @@ jobs:
         run: |
           chmod +x ./gradlew
           ./gradlew --no-daemon --stacktrace assembleRelease
-          cp app/build/outputs/apk/release/app-release.apk CallGuard-1.0.0.apk
+          VERSION=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([0-9.]+)".*/\1/')
+          cp app/build/outputs/apk/release/app-release.apk "CallGuard-$VERSION.apk"
+          echo "APK=CallGuard-$VERSION.apk" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: CallGuard-1.0.0
-          path: CallGuard-1.0.0.apk
+          name: CallGuard
+          path: ${{ env.APK }}
           if-no-files-found: error
 
       - name: Publish release
@@ -41,8 +43,8 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: CallGuard ${{ github.ref_name }}
           body: |
-            Универсальный APK: один файл на все устройства, без разделения по ABI.
+            Универсальный APK: один файл на все устройства.
 
-            Установка: скачать `CallGuard-1.0.0.apk`, разрешить установку из неизвестных источников, открыть приложение, выдать роль определителя номера и доступ к контактам.
-          files: CallGuard-1.0.0.apk
+            Установка: скачать файл ниже, разрешить установку из неизвестных источников, открыть приложение, выдать роль определителя и доступ к контактам.
+          files: ${{ env.APK }}
           make_latest: true
