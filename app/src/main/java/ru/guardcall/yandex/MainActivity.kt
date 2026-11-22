@@ -151,7 +151,7 @@ class MainActivity : Activity() {
         Thread({
             val started = System.currentTimeMillis()
             val result = try {
-                YandexChecker.check(number)
+                YandexChecker.check(this@MainActivity, number, 20000)
             } catch (t: Throwable) {
                 CheckResult(Verdict.UNKNOWN, "ошибка: ${t.javaClass.simpleName}")
             }

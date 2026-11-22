@@ -46,13 +46,13 @@ class CallGuardService : CallScreeningService() {
             return
         }
 
-        // Система ждёт ответ 5 секунд. Через 4.2 с отвечаем "обычный звонок".
-        main.postDelayed({ timeout(callDetails, number) }, 4200)
+        // Система ждёт ответ 5 секунд. Через 4.3 с отвечаем "обычный звонок".
+        main.postDelayed({ timeout(callDetails, number) }, 4300)
 
         Thread({
             val started = System.currentTimeMillis()
             val result = try {
-                YandexChecker.check(number)
+                YandexChecker.check(this, number, 3500)
             } catch (t: Throwable) {
                 CheckResult(Verdict.UNKNOWN, "ошибка: ${t.javaClass.simpleName}")
             }

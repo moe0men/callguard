@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   apk:
@@ -31,3 +31,15 @@ jobs:
           name: yandex-call-guard-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          body: |
+            Автосборка из коммита ${{ github.sha }}.
+            Установка: скачать `app-debug.apk`, разрешить установку из неизвестных источников, открыть приложение и выдать роль определителя номера.
+          files: app/build/outputs/apk/debug/app-debug.apk
+          make_latest: true

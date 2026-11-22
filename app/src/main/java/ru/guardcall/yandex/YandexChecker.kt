@@ -1,25 +1,38 @@
 package ru.guardcall.yandex
 
-import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
+import android.annotation.SuppressLint
+import android.content.Context
+import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.webkit.CookieManager
+import android.webkit.WebSettings
+import android.webkit.WebView
+import org.json.JSONTokener
 import java.net.URLEncoder
-import java.util.zip.GZIPInputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Мгновенная проверка номера обычным поиском Яндекса. Без API-ключей и без баз.
- * Бесплатный HTML-поиск иногда отдаёт SmartCaptcha: тогда результат UNKNOWN.
+ * Проверка номера через настоящий движок Chromium (WebView).
+ * Обычный HTTP-клиент Яндекс режет капчей: нет JavaScript и отпечаток не браузерный.
+ * Реальный WebView проходит проверку и получает обычную выдачу.
  */
 object YandexChecker {
 
-    private const val UA =
-        "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    private const val DESKTOP_UA =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-    private const val BASE = "https://yandex.ru/search/?text="
-
-    /** Насколько близко к номеру должна стоять метка, символов. */
     private const val PROXIMITY = 600
+    private const val POLL_MS = 200L
+    private const val RENDER_DELAY_MS = 350L
+
+    private val main = Handler(Looper.getMainLooper())
+    private var webView: WebView? = null
 
     private val badMarkers = listOf(
         "нежелательный звонок",
@@ -33,125 +46,139 @@ object YandexChecker {
         "навязчив",
         "назойлив",
         "рекламный звонок",
+        "предложение товаров или услуг",
         "не берите трубку",
         "коллектор"
     )
 
     private val goodMarkers = listOf(
         "полезный звонок",
-        "данных об абоненте нет",
-        "нет информации о номере",
-        "не является спамом",
-        "проверенный номер"
+        "данных об абоненте нет"
     )
 
-    private val cookieJar = StringBuilder()
+    /** Прогрев движка, чтобы первый звонок не платил за инициализацию WebView. */
+    fun warmUp(ctx: Context) {
+        main.post { runCatching { obtain(ctx.applicationContext) } }
+    }
 
-    fun check(rawNumber: String, timeoutMs: Long = 3000): CheckResult {
-        val deadline = System.currentTimeMillis() + timeoutMs
+    fun check(ctx: Context, rawNumber: String, timeoutMs: Long = 3500): CheckResult {
         val number = PhoneNumbers.normalize(rawNumber)
         if (number.length < 10) {
             return CheckResult(Verdict.UNKNOWN, "короткий номер, не проверяю")
         }
 
-        val query = URLEncoder.encode(PhoneNumbers.pretty(number), "UTF-8")
-        val url = BASE + query + "&lr=213&noreask=1"
-
-        val html = try {
-            fetch(url, deadline)
-        } catch (t: Throwable) {
-            return CheckResult(Verdict.UNKNOWN, "сеть: ${t.javaClass.simpleName}")
+        val latch = CountDownLatch(1)
+        val done = AtomicBoolean(false)
+        val holder = AtomicReference(CheckResult(Verdict.UNKNOWN, "нет ответа WebView"))
+        val finish: (CheckResult) -> Unit = { result ->
+            if (done.compareAndSet(false, true)) {
+                holder.set(result)
+                latch.countDown()
+            }
         }
 
-        if (isCaptcha(html)) {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        main.post {
+            try {
+                val wv = obtain(ctx.applicationContext)
+                val url = buildUrl(number)
+                wv.loadUrl(url)
+                waitReady(wv, url, number, deadline, finish)
+            } catch (t: Throwable) {
+                finish(CheckResult(Verdict.UNKNOWN, "WebView: ${t.javaClass.simpleName}"))
+            }
+        }
+
+        if (!latch.await(timeoutMs + 300, TimeUnit.MILLISECONDS)) {
+            finish(CheckResult(Verdict.UNKNOWN, "WebView не успел за $timeoutMs мс"))
+        }
+        return holder.get()
+    }
+
+    private fun buildUrl(number: String): String {
+        val query = URLEncoder.encode(PhoneNumbers.pretty(number), "UTF-8")
+        return "https://yandex.ru/search/?text=$query&lr=213&noreask=1"
+    }
+
+    private fun waitReady(
+        wv: WebView,
+        url: String,
+        number: String,
+        deadline: Long,
+        finish: (CheckResult) -> Unit
+    ) {
+        if (SystemClock.uptimeMillis() > deadline) {
+            finish(CheckResult(Verdict.UNKNOWN, "WebView не успел загрузить страницу"))
+            return
+        }
+        wv.evaluateJavascript("document.readyState") { state ->
+            val ready = state?.contains("complete") == true
+            if (!ready) {
+                main.postDelayed({ waitReady(wv, url, number, deadline, finish) }, POLL_MS)
+                return@evaluateJavascript
+            }
+            // Дать странице дорисовать блоки после load.
+            main.postDelayed({
+                wv.evaluateJavascript("document.body ? document.body.innerText : ''") { raw ->
+                    finish(parse(unquote(raw), wv.url ?: url, number))
+                }
+            }, RENDER_DELAY_MS)
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun obtain(ctx: Context): WebView {
+        webView?.let { return it }
+
+        val wv = WebView(ctx)
+        wv.setBackgroundColor(Color.TRANSPARENT)
+        wv.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            loadsImagesAutomatically = false
+            blockNetworkImage = true
+            cacheMode = WebSettings.LOAD_DEFAULT
+            userAgentString = DESKTOP_UA
+        }
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+        webView = wv
+        return wv
+    }
+
+    /** evaluateJavascript отдаёт JSON-строку, её надо раскодировать. */
+    private fun unquote(raw: String?): String {
+        if (raw.isNullOrBlank() || raw == "null") return ""
+        return try {
+            JSONTokener(raw).nextValue() as? String ?: raw
+        } catch (t: Throwable) {
+            raw
+        }
+    }
+
+    private fun parse(rawText: String, url: String, number: String): CheckResult {
+        val text = rawText.replace(Regex("\\s+"), " ").lowercase()
+        if (text.isEmpty()) return CheckResult(Verdict.UNKNOWN, "пустая страница")
+
+        if (url.contains("showcaptcha", true) || text.contains("подтвердите, что запросы")) {
             return CheckResult(Verdict.UNKNOWN, "Яндекс показал капчу")
         }
 
-        val text = stripHtml(html)
         val positions = numberPositions(text, number)
         if (positions.isEmpty()) {
             return CheckResult(Verdict.UNKNOWN, "номер не найден в выдаче")
         }
 
         val bad = nearest(text, badMarkers, positions)
-        if (bad != null) {
-            return CheckResult(Verdict.SPAM, "метка: «${bad.first}»")
-        }
+        if (bad != null) return CheckResult(Verdict.SPAM, "метка: «${bad.first}»")
 
         val good = nearest(text, goodMarkers, positions)
-        if (good != null) {
-            return CheckResult(Verdict.CLEAN, "метка: «${good.first}»")
-        }
+        if (good != null) return CheckResult(Verdict.CLEAN, "метка: «${good.first}»")
 
         return CheckResult(Verdict.UNKNOWN, "меток спама нет")
     }
 
-    private fun isCaptcha(html: String): Boolean {
-        val probes = listOf(
-            "SmartCaptcha",
-            "showcaptcha",
-            "Подтвердите, что запросы отправляли вы",
-            "captcha__image"
-        )
-        return probes.any { html.contains(it, ignoreCase = true) }
-    }
-
-    private fun fetch(url: String, deadline: Long): String {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.instanceFollowRedirects = true
-        conn.connectTimeout = 1500
-        conn.readTimeout = 2200
-        conn.setRequestProperty("User-Agent", UA)
-        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml")
-        conn.setRequestProperty("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.5")
-        conn.setRequestProperty("Accept-Encoding", "gzip")
-        synchronized(cookieJar) {
-            if (cookieJar.isNotEmpty()) conn.setRequestProperty("Cookie", cookieJar.toString())
-        }
-
-        try {
-            val code = conn.responseCode
-            if (code !in 200..299) throw IOException("HTTP $code")
-            storeCookies(conn)
-
-            val gzip = conn.contentEncoding?.contains("gzip", ignoreCase = true) == true
-            val stream = if (gzip) GZIPInputStream(conn.inputStream) else conn.inputStream
-            val text = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-
-            if (System.currentTimeMillis() > deadline) throw IOException("timeout")
-            return text
-        } finally {
-            conn.disconnect()
-        }
-    }
-
-    private fun storeCookies(conn: HttpURLConnection) {
-        val setCookies = conn.headerFields["Set-Cookie"] ?: return
-        if (setCookies.isEmpty()) return
-        synchronized(cookieJar) {
-            val fresh = setCookies.mapNotNull { it.substringBefore(';').trim().takeIf(String::isNotEmpty) }
-            val merged = (cookieJar.toString().split("; ").filter { it.isNotEmpty() } + fresh)
-                .associateBy { it.substringBefore('=') }
-                .values
-            cookieJar.setLength(0)
-            cookieJar.append(merged.joinToString("; "))
-        }
-    }
-
-    private fun stripHtml(html: String): String {
-        var s = html.replace(Regex("(?is)<(script|style|noscript)[^>]*>.*?</\\1>"), " ")
-        s = s.replace(Regex("(?s)<[^>]+>"), " ")
-        s = s
-            .replace("&nbsp;", " ")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&")
-        return s.replace(Regex("\\s+"), " ").lowercase()
-    }
-
-    /** Все позиции номера в тексте: +7 900 123-45-67, 8 900 123 45 67, 79001234567. */
     private fun numberPositions(text: String, normalized: String): List<Int> {
         val ten = normalized.takeLast(10)
         if (ten.length < 10) return emptyList()
